@@ -340,11 +340,13 @@ public class MetricRepository {
             for (var part : parts) {
                 if (part.startsWith("tag:")) {
                     var tagKey = part.substring(4);
+                    ensureIdentifierIsSafe(tagKey);
                     if (!tagKey.isBlank()) {
                         tags.add(tagKey);
                     }
                 } else if (part.startsWith("context:")) {
                     var contextKey = part.substring(8);
+                    ensureIdentifierIsSafe(contextKey);
                     if (!contextKey.isBlank()) {
                         contexts.add(contextKey);
                     }
@@ -371,6 +373,7 @@ public class MetricRepository {
                     var type = split[0];
                     var key = split[1];
                     var val = split[2];
+                    ensureIdentifierIsSafe(key);
                     if (type.equals("tag")) {
                         tagFilters.add(new FilterPair(key, val));
                     } else if (type.equals("context")) {
@@ -379,7 +382,7 @@ public class MetricRepository {
                         throw new BadRequestException("Invalid filter type. Expected 'tag' or 'context'");
                     }
                 } catch (Exception e) {
-                    throw new BadRequestException("Invalid filter format. Expected comma-separated list of type:key:value triplets, e.g. tag:region:us-west-1,context:environment:prod", e);
+                    throw new BadRequestException("Invalid filter format. Expected comma-separated list of type:key:value triplets, e.g. tag:region:us-west-1,context:environment:prod. Key may only consist of numbers, letters and underscores", e);
                 }
             }
             return new FilterSpec(tagFilters, contextFilters);
@@ -413,6 +416,12 @@ public class MetricRepository {
 
         public static AggregationType fromString(String value) {
             return AggregationType.valueOf(value.toUpperCase());
+        }
+    }
+
+    private static void ensureIdentifierIsSafe(String identifier) {
+        if (!identifier.matches("^[a-zA-Z0-9_]+$")) {
+            throw new BadRequestException("Invalid identifier. Expected only letters, numbers, and underscores");
         }
     }
 }
