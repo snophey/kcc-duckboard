@@ -159,8 +159,7 @@ public class MetricRepository {
     private Set<String> getAllJsonKeys(String column) {
         return getConnection()
                 .map(conn -> {
-                    try (var statement = conn.prepareStatement("SELECT DISTINCT json_keys( ? ) FROM " + TABLE_NAME)) {
-                        statement.setString(1, column);
+                    try (var statement = conn.prepareStatement("SELECT DISTINCT json_keys( " + column + " ) FROM " + TABLE_NAME)) {
                         var result = statement.executeQuery();
                         var keys = new HashSet<String>();
                         while (result.next()) {
@@ -176,23 +175,6 @@ public class MetricRepository {
                     return new HashSet<String>();
                 })
                 .orElse(new HashSet<>());
-    }
-
-    public double getMetricAverage(String metricName) {
-        return getConnection()
-                .map(conn -> {
-                    try (var statement = conn.prepareStatement("SELECT AVG(value) FROM " + TABLE_NAME + " WHERE initial_metric_name = ?")) {
-                        statement.setString(1, metricName);
-                        var result = statement.executeQuery();
-                        if (result.next()) {
-                            return result.getDouble(1);
-                        }
-                    } catch (SQLException e) {
-                        Log.error("Failed to get metric average", e);
-                    }
-                    return 0.0;
-                })
-                .orElse(0.0);
     }
 
     public List<AggregatedDataWindowed> getAggregatedMetric(String metricName,
