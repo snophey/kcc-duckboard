@@ -2,6 +2,7 @@ package dev.arov;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.github.javafaker.Faker;
 import io.quarkus.logging.Log;
 import io.quarkus.runtime.StartupEvent;
 import io.spoud.kcc.data.AggregatedDataWindowed;
@@ -11,6 +12,7 @@ import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.clients.consumer.ConsumerRecords;
 import org.duckdb.DuckDBConnection;
 import org.duckdb.DuckDBTimestamp;
+import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.eclipse.microprofile.reactive.messaging.*;
 
 import jakarta.enterprise.context.ApplicationScoped;
@@ -33,6 +35,10 @@ public class MetricRepository {
     private static final String TABLE_NAME = "aggregated_data";
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
 
+    @ConfigProperty(name = "seed.with.fake.data")
+    boolean seedWithFakeData;
+
+
     void onStartup(@Observes StartupEvent ev) {
         // this is where we create DuckDb tables
         Log.info("Initializing OLAP database");
@@ -43,6 +49,32 @@ public class MetricRepository {
                 Log.error("Failed to create table", e);
             }
         });
+        if (seedWithFakeData) {
+            Log.info("Seeding database with fake data");
+            var faker = new Faker();
+            var allAppNames = IntStream.range(0, 10)
+                    .mapToObj(i -> faker.app().name())
+                    .toArray(String[]::new);
+            var allCountries = IntStream.range(0, 4)
+                    .mapToObj(i -> faker.country().countryCode2())
+                    .toArray(String[]::new);
+            var metrics = IntStream.range(0, 1000_000)
+                    .mapToObj(i -> {
+                        var start = Instant.now().minus(Duration.ofDays(faker.number().numberBetween(1, 365))).minus(Duration.ofHours(faker.number().numberBetween(1, 24)));
+                        var appName = faker.options().option(allAppNames);
+                        return AggregatedDataWindowed.newBuilder()
+                                .setStartTime(start)
+                                .setEndTime(start.plus(Duration.ofDays(1)))
+                                .setInitialMetricName(faker.options().option("bytesin", "bytesout", "storage"))
+                                .setName(faker.animal().name())
+                                .setTags(Map.of("region", faker.options().option(allCountries)))
+                                .setContext(Map.of("app", appName))
+                                .setValue(faker.number().randomDouble(0, 100, 1000_000))
+                                .build();
+                    })
+                    .toList();
+            ingestMetrics(metrics, Function.identity());
+        }
     }
 
     private void createTableIfNotExists(DuckDBConnection connection) throws SQLException {
@@ -178,25 +210,17 @@ public class MetricRepository {
                         var params = new ArrayList<>();
                         var query = new StringBuilder("SELECT ");
 
-                        for (var tag : groupBy.tags()) {
-                            params.add(tag);
-                            params.add("tag:" + tag);
-                        }
-                        for (var ctx : groupBy.contexts()) {
-                            params.add(ctx);
-                            params.add("ctx:" + ctx);
-                        }
-
                         var selected = Stream.concat(
-                                IntStream.range(0, groupBy.contexts().size()).mapToObj(i -> "context->>? as ?"),
-                                IntStream.range(0, groupBy.tags().size()).mapToObj(i -> "tags->>? as ?")
+                                groupBy.contexts().stream().map(ctx -> String.format("COALESCE(context->>'%s', 'unknown') as \"%s\"", ctx, "ctx:" + ctx)),
+                                groupBy.tags().stream().map(ctx -> String.format("COALESCE(tags->>'%s', 'unknown') as \"%s\"", ctx, "tag:" + ctx))
                         ).collect(Collectors.joining(", ", " ", " "));
-
+                        if (!selected.isBlank()) {
+                            query.append(selected).append(", ");
+                        }
                         if (groupBy.groupByResourceName()) {
-                            query.append(", name");
+                            query.append("name, ");
                         }
 
-                        query.append(selected).append(", ");
                         switch (aggType) {
                             case AVG -> query.append("AVG(value) as value");
                             case SUM -> query.append("SUM(value) as value");
@@ -215,13 +239,11 @@ public class MetricRepository {
                             params.add(Timestamp.valueOf(endTimestamp.timestamp()));
                         }
                         for (var filter : tagFilter.tagFilters()) {
-                            query.append(" AND (tags->>? = ?)");
-                            params.add(filter.key());
+                            query.append(String.format(" AND (tags->>'%s' = ?)", filter.key()));
                             params.add(filter.value());
                         }
                         for (var filter : tagFilter.contextFilters()) {
-                            query.append(" AND (context->>? = ?)");
-                            params.add(filter.key());
+                            query.append(String.format(" AND (context->>'%s' = ?)", filter.key()));
                             params.add(filter.value());
                         }
                         if (groupBy.groupByResourceName() || (!groupBy.tags().isEmpty() || !groupBy.contexts().isEmpty())) {
