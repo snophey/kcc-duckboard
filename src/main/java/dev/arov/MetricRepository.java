@@ -156,6 +156,24 @@ public class MetricRepository {
         return getAllJsonKeys("context");
     }
 
+    public Set<String> getAllMetrics() {
+        return getConnection()
+                .map(conn -> {
+                    try (var statement = conn.prepareStatement("SELECT DISTINCT initial_metric_name FROM " + TABLE_NAME)) {
+                        var result = statement.executeQuery();
+                        var metrics = new HashSet<String>();
+                        while (result.next()) {
+                            metrics.add(result.getString(1));
+                        }
+                        return metrics;
+                    } catch (SQLException e) {
+                        Log.error("Failed to get all metrics", e);
+                    }
+                    return new HashSet<String>();
+                })
+                .orElse(new HashSet<>());
+    }
+
     private Set<String> getAllJsonKeys(String column) {
         return getConnection()
                 .map(conn -> {

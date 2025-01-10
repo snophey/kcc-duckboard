@@ -21,6 +21,11 @@ public class MetricResource {
     MetricRepository metricRepository;
 
     @GET
+    public Set<String> getMetrics() {
+        return metricRepository.getAllMetrics();
+    }
+
+    @GET
     @Path("/{metricName}/{aggType}")
     public List<AggregatedDataWindowed> getAggregatedMetric(@RestPath String metricName,
                                                             @RestPath MetricRepository.AggregationType aggType,
