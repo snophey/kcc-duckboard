@@ -31,12 +31,17 @@ public class NotFoundExceptionMapper implements ExceptionMapper<NotFoundExceptio
         return Optional.of(path.substring(lastDot).toLowerCase());
     }
 
+    private boolean isApiUri() {
+        return uriInfo.getPath().startsWith("/api/");
+    }
+
     @Override
     @Produces(MediaType.TEXT_HTML)
     public Response toResponse(NotFoundException exception) {
-        if (getUriExtension().filter(ext -> !ext.equals(".html")).isPresent()) {
+        if (isApiUri() || getUriExtension().filter(ext -> !ext.equals(".html")).isPresent()) {
             // if any extension other than .html is requested, return a 404 error
             // since it makes no sense to serve a html page when a different kind of resource is requested
+            // also if the request is targeting a non-existing API endpoint, return a 404 error
             return Response.status(Response.Status.NOT_FOUND).build();
         }
         // serve the index.html page when a 404 error occurs (and let the client-side router handle the routing)
