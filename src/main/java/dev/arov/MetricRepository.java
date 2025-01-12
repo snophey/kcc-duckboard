@@ -5,7 +5,9 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.github.javafaker.Faker;
 import io.quarkus.logging.Log;
 import io.quarkus.runtime.StartupEvent;
+import io.smallrye.common.annotation.Blocking;
 import io.spoud.kcc.data.AggregatedDataWindowed;
+import io.spoud.kcc.data.EntityType;
 import jakarta.enterprise.event.Observes;
 import jakarta.ws.rs.BadRequestException;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
@@ -18,6 +20,7 @@ import org.eclipse.microprofile.reactive.messaging.*;
 import jakarta.enterprise.context.ApplicationScoped;
 
 import java.sql.DriverManager;
+import java.sql.PreparedStatement;
 import java.sql.SQLException;
 import java.sql.Timestamp;
 import java.time.*;
@@ -52,21 +55,23 @@ public class MetricRepository {
         if (seedWithFakeData) {
             Log.info("Seeding database with fake data");
             var faker = new Faker();
-            var allAppNames = IntStream.range(0, 10)
+            var allAppNames = IntStream.range(0, 5)
                     .mapToObj(i -> faker.app().name())
                     .toArray(String[]::new);
             var allCountries = IntStream.range(0, 4)
                     .mapToObj(i -> faker.country().countryCode2())
                     .toArray(String[]::new);
-            var metrics = IntStream.range(0, 1000_000)
+            var metrics = IntStream.range(0, 1_000)
                     .mapToObj(i -> {
-                        var start = Instant.now().minus(Duration.ofDays(faker.number().numberBetween(1, 365))).minus(Duration.ofHours(faker.number().numberBetween(1, 24)));
+                        var start = LocalDateTime.parse("2025-01-01T00:00:00", DateTimeFormatter.ISO_DATE_TIME)
+                                .plus(Duration.ofHours(faker.number().numberBetween(0, 24)));
                         var appName = faker.options().option(allAppNames);
                         return AggregatedDataWindowed.newBuilder()
-                                .setStartTime(start)
-                                .setEndTime(start.plus(Duration.ofDays(1)))
+                                .setStartTime(start.toInstant(ZoneOffset.UTC))
+                                .setEndTime(start.plus(Duration.ofHours(1)).toInstant(ZoneOffset.UTC))
                                 .setInitialMetricName(faker.options().option("bytesin", "bytesout", "storage"))
-                                .setName(faker.animal().name())
+                                .setName(faker.options().option("sales", "marketing", "engineering"))
+                                .setEntityType(EntityType.TOPIC)
                                 .setTags(Map.of("region", faker.options().option(allCountries)))
                                 .setContext(Map.of("app", appName))
                                 .setValue(faker.number().randomDouble(0, 100, 1000_000))
@@ -83,10 +88,12 @@ public class MetricRepository {
                     "start_time TIMESTAMP_MS NOT NULL, " +
                     "end_time TIMESTAMP_MS NOT NULL, " +
                     "initial_metric_name VARCHAR NOT NULL, " +
+                    "entity_type VARCHAR NOT NULL, " +
                     "name VARCHAR NOT NULL, " +
                     "tags JSON NOT NULL, " +
                     "context JSON NOT NULL, " +
-                    "value DOUBLE NOT NULL)");
+                    "value DOUBLE NOT NULL," +
+                    "PRIMARY KEY (start_time, end_time, entity_type, initial_metric_name, name))");
         }
     }
 
@@ -94,6 +101,7 @@ public class MetricRepository {
      * Consume the message from the "words-in" channel, uppercase it and send it to the uppercase channel.
      * Messages come from the broker.
      **/
+    @Blocking
     @Incoming("words-in")
     public void onIncomingMessages(ConsumerRecords<String, AggregatedDataWindowed> messages) {
         Log.infof("Received batch of %d metrics", messages.count());
@@ -114,7 +122,9 @@ public class MetricRepository {
     private <W> void ingestMetrics(Iterable<W> wrappedMetrics, Function<W, AggregatedDataWindowed> unwrapFunction) {
         getConnection().ifPresent((conn) -> {
             var skipped = 0;
-            try (var appender = conn.createAppender(DuckDBConnection.DEFAULT_SCHEMA, TABLE_NAME)) {
+            var count = 0;
+            var startTime = Instant.now();
+            try (var stmt = conn.prepareStatement("INSERT OR REPLACE INTO " + TABLE_NAME + " VALUES (?, ?, ?, ?, ?, ?, ?, ?)")) {
                 for (var wrappedMetric : wrappedMetrics) {
                     var metric = unwrapFunction.apply(wrappedMetric);
                     Log.debugv("Ingesting metric: {0}", metric);
@@ -130,21 +140,23 @@ public class MetricRepository {
                         skipped++;
                         continue;
                     }
-                    appender.beginRow();
-                    appender.appendLocalDateTime(start.toLocalDateTime());
-                    appender.appendLocalDateTime(end.toLocalDateTime());
-                    appender.append(metric.getInitialMetricName());
-                    appender.append(metric.getName());
-                    appender.append(tags);
-                    appender.append(context);
-                    appender.append(metric.getValue());
-                    appender.endRow();
+                    stmt.setTimestamp(1, start);
+                    stmt.setTimestamp(2, end);
+                    stmt.setString(3, metric.getInitialMetricName());
+                    stmt.setString(4, metric.getEntityType().name());
+                    stmt.setString(5, metric.getName());
+                    stmt.setString(6, tags);
+                    stmt.setString(7, context);
+                    stmt.setDouble(8, metric.getValue());
+                    stmt.addBatch();
+                    count++;
                 }
+                stmt.executeBatch();
             } catch (SQLException e) {
                 Log.error("Failed to ingest ALL metrics to OLAP database", e);
                 return;
             }
-            Log.infof("Ingestion complete. Skipped %d metrics.", skipped);
+            Log.infof("Ingested %d metrics. Skipped %d metrics. Duration: %s", count, skipped, Duration.between(startTime, Instant.now()));
         });
     }
 
@@ -178,21 +190,48 @@ public class MetricRepository {
         return getConnection()
                 .map(conn -> {
                     try (var statement = conn.prepareStatement("SELECT DISTINCT json_keys( " + column + " ) FROM " + TABLE_NAME)) {
-                        var result = statement.executeQuery();
-                        var keys = new HashSet<String>();
-                        while (result.next()) {
-                            var key = result.getString(1);
-                            if (key != null) {
-                                keys.add(key.substring(1, key.length() - 1)); // remove brackets
-                            }
-                        }
-                        return keys;
+                        return getStatementResultAsStrings(statement, true);
                     } catch (Exception e) {
                         Log.error("Failed to get keys of column: " + column, e);
                     }
                     return new HashSet<String>();
                 })
                 .orElse(new HashSet<>());
+    }
+
+    private Set<String> getAllJsonKeyValues(String column, String key) {
+        ensureIdentifierIsSafe(key);
+        return getConnection()
+                .map(conn -> {
+                    try (var statement = conn.prepareStatement("SELECT DISTINCT " + column + "->>'" + key + "' FROM " + TABLE_NAME)) {
+                        return getStatementResultAsStrings(statement, false);
+                    } catch (Exception e) {
+                        Log.error("Failed to get keys of column: " + column, e);
+                    }
+                    return new HashSet<String>();
+                })
+                .orElse(new HashSet<>());
+    }
+
+    private Set<String> getStatementResultAsStrings(PreparedStatement statement, boolean removeBrackets) throws SQLException {
+        var result = statement.executeQuery();
+        var keys = new HashSet<String>();
+        while (result.next()) {
+            var keyValue = result.getString(1);
+            if (keyValue != null) {
+                keys.add(removeBrackets && keyValue.endsWith("]") && keyValue.startsWith("[") ?
+                        keyValue.substring(1, keyValue.length() - 1) : keyValue);
+            }
+        }
+        return keys;
+    }
+
+    public Set<String> getAllTagValues(String tagKey) {
+        return getAllJsonKeyValues("tags", tagKey);
+    }
+
+    public Set<String> getAllContextValues(String contextKey) {
+        return getAllJsonKeyValues("context", contextKey);
     }
 
     public List<AggregatedDataWindowed> getAggregatedMetric(String metricName,
