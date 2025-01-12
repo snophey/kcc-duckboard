@@ -210,15 +210,9 @@ public class MetricRepository {
                         var params = new ArrayList<>();
                         var query = new StringBuilder("SELECT ");
 
-                        var selected = Stream.concat(
-                                groupBy.contexts().stream().map(ctx -> String.format("COALESCE(context->>'%s', 'unknown') as \"%s\"", ctx, "ctx:" + ctx)),
-                                groupBy.tags().stream().map(ctx -> String.format("COALESCE(tags->>'%s', 'unknown') as \"%s\"", ctx, "tag:" + ctx))
-                        ).collect(Collectors.joining(", ", " ", " "));
+                        var selected = groupBy.toSelectColumns().stream().collect(Collectors.joining(", ", " ", " "));
                         if (!selected.isBlank()) {
                             query.append(selected).append(", ");
-                        }
-                        if (groupBy.groupByResourceName()) {
-                            query.append("name, ");
                         }
 
                         switch (aggType) {
@@ -246,16 +240,7 @@ public class MetricRepository {
                             query.append(String.format(" AND (context->>'%s' = ?)", filter.key()));
                             params.add(filter.value());
                         }
-                        if (groupBy.groupByResourceName() || (!groupBy.tags().isEmpty() || !groupBy.contexts().isEmpty())) {
-                            query.append(" GROUP BY ");
-                            query.append(groupBy.tags().stream().map(k -> String.format("\"tag:%s\"", k)).collect(Collectors.joining(", ")));
-                            if (!groupBy.tags().isEmpty() && !groupBy.contexts().isEmpty())
-                                query.append(", ");
-                            query.append(groupBy.contexts().stream().map(k -> String.format("\"ctx:%s\"", k)).collect(Collectors.joining(", ")));
-                            if (groupBy.groupByResourceName()) {
-                                query.append(", name");
-                            }
-                        }
+                        query.append(groupBy.toGroupByString());
                         if (sort != null) {
                             query.append(" ORDER BY value ");
                             query.append(sort);
@@ -286,6 +271,12 @@ public class MetricRepository {
                                 }
                                 for (var ctx : groupBy.contexts()) {
                                     context.put(ctx, result.getString("ctx:" + ctx));
+                                }
+                                if (groupBy.groupByStartTime()) {
+                                    startTime = result.getTimestamp("start_time").toInstant();
+                                }
+                                if (groupBy.groupByEndTime()) {
+                                    endTime = result.getTimestamp("end_time").toInstant();
                                 }
                                 metrics.add(AggregatedDataWindowed.newBuilder()
                                                 .setContext(context)
@@ -331,12 +322,14 @@ public class MetricRepository {
                 .orElse("");
     }
 
-    public record GroupBySpec(List<String> tags, List<String> contexts, boolean groupByResourceName) {
+    public record GroupBySpec(List<String> tags, List<String> contexts, boolean groupByResourceName, boolean groupByStartTime, boolean groupByEndTime) {
         public static GroupBySpec fromString(String value) {
             var parts = value.split(",");
             var tags = new ArrayList<String>();
             var contexts = new ArrayList<String>();
             var groupByResourceName = false;
+            var groupByStartTime = false;
+            var groupByEndTime = false;
             for (var part : parts) {
                 if (part.startsWith("tag:")) {
                     var tagKey = part.substring(4);
@@ -352,10 +345,44 @@ public class MetricRepository {
                     }
                 } else if (part.startsWith("builtin:")) {
                     var builtinKey = part.substring(8);
-                    groupByResourceName = builtinKey.equals("resourceName");
+                    groupByResourceName = builtinKey.equals("resourceName") || groupByResourceName;
+                    groupByStartTime = builtinKey.equals("startTime") || groupByStartTime;
+                    groupByEndTime = builtinKey.equals("endTime") || groupByEndTime;
                 }
             }
-            return new GroupBySpec(tags, contexts, groupByResourceName);
+            return new GroupBySpec(tags, contexts, groupByResourceName, groupByStartTime, groupByEndTime);
+        }
+
+        public List<String> toSelectColumns() {
+            return Stream.concat(
+                    tags.stream().map(k -> String.format("COALESCE(tags->>'%s', 'unknown') as \"%s\"", k, "tag:" + k)),
+                    Stream.concat(
+                            contexts.stream().map(k -> String.format("COALESCE(context->>'%s', 'unknown') as \"%s\"", k, "ctx:" + k)),
+                            Stream.of("name", "start_time", "end_time")
+                                    .filter(col -> (col.equals("name") && groupByResourceName)
+                                            || (col.equals("start_time") && groupByStartTime)
+                                            || (col.equals("end_time") && groupByEndTime))
+                    )
+            ).collect(Collectors.toList());
+        }
+
+        public String toGroupByString() {
+            boolean anyBuiltins = groupByEndTime || groupByResourceName || groupByStartTime;
+            boolean anyContext = !contexts.isEmpty();
+            boolean anyTags = !tags.isEmpty();
+            if (!anyTags && !anyContext && !anyBuiltins) {
+                return "";
+            }
+            return Stream.concat(
+                    tags.stream().map(k -> String.format("\"tag:%s\"", k)),
+                    Stream.concat(
+                            contexts.stream().map(k -> String.format("\"ctx:%s\"", k)),
+                            Stream.of("name", "start_time", "end_time")
+                                    .filter(col -> (col.equals("name") && groupByResourceName)
+                                            || (col.equals("start_time") && groupByStartTime)
+                                            || (col.equals("end_time") && groupByEndTime))
+                            )
+            ).collect(Collectors.joining(", ", " GROUP BY ", ""));
         }
     }
 

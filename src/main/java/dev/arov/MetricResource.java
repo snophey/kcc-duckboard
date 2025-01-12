@@ -43,7 +43,7 @@ public class MetricResource {
                 filter == null ? new MetricRepository.FilterSpec(List.of(), List.of()) : filter,
                 startTimestamp,
                 endTimestamp,
-                groupBy == null ? new MetricRepository.GroupBySpec(List.of(), List.of(), false) : groupBy,
+                groupBy == null ? new MetricRepository.GroupBySpec(List.of(), List.of(), false, false, false) : groupBy,
                 limit != null && limit < 0 ? null : limit,
                 offset != null && offset < 0 ? null : offset,
                 sort);
