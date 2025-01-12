@@ -56,9 +56,21 @@ public class MetricResource {
     }
 
     @GET
+    @Path("/tags/{tagKey}/values")
+    public Set<String> getTagValues(@RestPath String tagKey) {
+        return metricRepository.getAllTagValues(tagKey);
+    }
+
+    @GET
     @Path("/contexts")
     public Set<String> getContexts() {
         return metricRepository.getAllContextKeys();
+    }
+
+    @GET
+    @Path("/contexts/{contextKey}/values")
+    public Set<String> getContextValues(@RestPath String contextKey) {
+        return metricRepository.getAllContextValues(contextKey);
     }
 
     // only for testing purposes (disable in production)
